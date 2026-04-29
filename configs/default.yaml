@@ -1,0 +1,20 @@
+# U-Net 医学图像分割 - 默认配置
+model: unet              # 可选: unet / attention_unet / unet_pp
+in_channels: 1
+out_channels: 1
+
+train:
+  epochs: 50
+  batch_size: 2
+  lr: 0.001
+  augmentation: false
+  image_dir: ./dataset/train/xray
+  mask_dir: ./dataset/train/mask
+  checkpoint_dir: ./checkpoint
+  save_every: 10         # 每隔 N 个 epoch 保存一次 checkpoint
+
+test:
+  checkpoint: ./checkpoint/best_model.pth
+  image_dir: ./dataset/test/xray
+  mask_dir: ./dataset/test/mask
+  output_dir: ./output

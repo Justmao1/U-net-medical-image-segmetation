@@ -1,61 +1,59 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-class conv_block(nn.Module):
+class ConvBlock(nn.Module):
+    """两次 [Conv3x3 -> BN -> ReLU]"""
 
     def __init__(self, in_ch, out_ch):
-        super(conv_block, self).__init__()
-
+        super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True))
+            nn.ReLU(inplace=True),
+        )
 
     def forward(self, x):
-        x = self.conv(x)
-        return x
+        return self.conv(x)
 
 
-class up_conv(nn.Module):
+class UpConv(nn.Module):
+    """Upsample x2 + Conv3x3 + BN + ReLU"""
 
     def __init__(self, in_ch, out_ch):
-        super(up_conv, self).__init__()
+        super().__init__()
         self.up = nn.Sequential(
             nn.Upsample(scale_factor=2),
             nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
-        x = self.up(x)
-        return x
+        return self.up(x)
 
 
 class AttentionBlock(nn.Module):
+    """注意力门控模块，抑制无关特征、增强显著特征"""
+
     def __init__(self, F_g, F_l, F_int):
-        super(AttentionBlock, self).__init__()
+        super().__init__()
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
+            nn.BatchNorm2d(F_int),
         )
-
         self.W_x = nn.Sequential(
             nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
+            nn.BatchNorm2d(F_int),
         )
-
         self.psi = nn.Sequential(
             nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
             nn.BatchNorm2d(1),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
-
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, g, x):
@@ -66,10 +64,11 @@ class AttentionBlock(nn.Module):
         return x * psi
 
 
-class U_Net(nn.Module):
+class AttentionUNet(nn.Module):
+    """Attention U-Net，在跳跃连接上加注意力门控，输出 logits（不含 Sigmoid）"""
 
     def __init__(self, in_ch=1, out_ch=1):
-        super(U_Net, self).__init__()
+        super().__init__()
 
         n1 = 64
         filters = [n1, n1 * 2, n1 * 4, n1 * 8, n1 * 16]
@@ -79,31 +78,29 @@ class U_Net(nn.Module):
         self.Maxpool3 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.Maxpool4 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.Conv1 = conv_block(in_ch, filters[0])
-        self.Conv2 = conv_block(filters[0], filters[1])
-        self.Conv3 = conv_block(filters[1], filters[2])
-        self.Conv4 = conv_block(filters[2], filters[3])
-        self.Conv5 = conv_block(filters[3], filters[4])
+        self.Conv1 = ConvBlock(in_ch, filters[0])
+        self.Conv2 = ConvBlock(filters[0], filters[1])
+        self.Conv3 = ConvBlock(filters[1], filters[2])
+        self.Conv4 = ConvBlock(filters[2], filters[3])
+        self.Conv5 = ConvBlock(filters[3], filters[4])
 
-        self.Up5 = up_conv(filters[4], filters[3])
+        self.Up5 = UpConv(filters[4], filters[3])
         self.Att5 = AttentionBlock(F_g=filters[3], F_l=filters[3], F_int=filters[2])
-        self.Up_conv5 = conv_block(filters[4], filters[3])
+        self.Up_conv5 = ConvBlock(filters[4], filters[3])
 
-        self.Up4 = up_conv(filters[3], filters[2])
+        self.Up4 = UpConv(filters[3], filters[2])
         self.Att4 = AttentionBlock(F_g=filters[2], F_l=filters[2], F_int=filters[1])
-        self.Up_conv4 = conv_block(filters[3], filters[2])
+        self.Up_conv4 = ConvBlock(filters[3], filters[2])
 
-        self.Up3 = up_conv(filters[2], filters[1])
+        self.Up3 = UpConv(filters[2], filters[1])
         self.Att3 = AttentionBlock(F_g=filters[1], F_l=filters[1], F_int=filters[0])
-        self.Up_conv3 = conv_block(filters[2], filters[1])
+        self.Up_conv3 = ConvBlock(filters[2], filters[1])
 
-        self.Up2 = up_conv(filters[1], filters[0])
+        self.Up2 = UpConv(filters[1], filters[0])
         self.Att2 = AttentionBlock(F_g=filters[0], F_l=filters[0], F_int=32)
-        self.Up_conv2 = conv_block(filters[1], filters[0])
+        self.Up_conv2 = ConvBlock(filters[1], filters[0])
 
         self.Conv = nn.Conv2d(filters[0], out_ch, kernel_size=1, stride=1, padding=0)
-
-        self.active = torch.nn.Sigmoid()
 
     def forward(self, x):
         e1 = self.Conv1(x)
@@ -141,7 +138,4 @@ class U_Net(nn.Module):
         d2 = self.Up_conv2(d2)
 
         out = self.Conv(d2)
-
-        d1 = self.active(out)
-
-        return d1
+        return out

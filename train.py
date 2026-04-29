@@ -1,135 +1,140 @@
+import argparse
+import os
+
 import torch
 from torch import nn, optim
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-from network import U_Net
-import os
+from torch.utils.data import DataLoader
+
+from datasets import XRayDataset
+from models import UNet, AttentionUNet, UNetPP
 from tqdm import tqdm
-import cv2
-import numpy as np
-from PIL import Image
 
 
-class XRayDataset(Dataset):
-
-    def __init__(self, images_path_list, labels_path_list, split='Train', augmentation=False, device='cuda:1',
-                 image_size=(512, 512)):
-        self.images = images_path_list
-        self.labels = labels_path_list
-        self.augmentation = augmentation
-        self.device = device
-        self.split = split
-
-        self.transform = transforms.Compose([
-            transforms.Grayscale(),
-            transforms.ToTensor()
-        ])
-
-        if self.augmentation:
-            self.same_augmentation = transforms.Compose([
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomHorizontalFlip(p=0.5)
-            ])
-
-        if self.split == 'Train':
-            self._getitem = self._getitem_train
-            self.len_data = 100 * 16
-        else:
-            self._getitem = self._getitem_test
-            self.len_data = len(self.images)
-
-    def __getitem__(self, idx):
-        return self._getitem(idx)
-
-    def _getitem_test(self, idx):
-        name = self.images[idx].split('/')[-1]
-        image = Image.open(self.images[idx])
-        label = Image.open(self.labels[idx])
-        image = self.transform(image).to(self.device)
-        label = self.transform(label).to(self.device)
-        label = 1. * (label != 0)
-
-        return {'rgb': image,
-                'label': label,
-                'fname': name}
-
-    def _getitem_train(self, idx):
-        idx = idx % len(self.images)
-        name = self.images[idx].split('/')[-1]
-        image = Image.open(self.images[idx])
-        label = Image.open(self.labels[idx])
-
-        if self.augmentation:
-            seed = np.random.randint(0, 10000)
-            torch.random.manual_seed(seed)
-            image = self.same_augmentation(image)
-            label = self.same_augmentation(label)
-            torch.random.manual_seed(seed)
-
-        image = self.transform(image).to(self.device)
-        label = self.transform(label).to(self.device)
-        label = 1. * (label != 0)
-
-        return {'rgb': image,
-                'label': label,
-                'fname': name}
-
-    def __len__(self):
-        return self.len_data
+MODEL_REGISTRY = {
+    'unet': UNet,
+    'attention_unet': AttentionUNet,
+    'unet_pp': UNetPP,
+}
 
 
-image_path_train = './dataset/train/xray/'
-labels_path_train = './dataset/train/mask/'
-
-# 加载图像和标签文件名
-image_names_train = [filename for filename in os.listdir(image_path_train)]
-label_names_train = [filename for filename in os.listdir(labels_path_train)]
-
-# 创建完整的文件路径
-train_image_path = [os.path.join(image_path_train, file_name) for file_name in image_names_train]
-train_mask_path = [os.path.join(labels_path_train, file_name) for file_name in label_names_train]
-
-# 设置设备
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# 创建数据集和数据加载器
-train_dataset = XRayDataset(
-    images_path_list=train_image_path,
-    labels_path_list=train_mask_path,
-    augmentation=False,
-    split='Train',
-    device=device
-)
-
-train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True)
-
-# 定义U-Net模型
-unet = U_Net().to(device)
+def get_args():
+    parser = argparse.ArgumentParser(description='U-Net 医学图像分割训练')
+    parser.add_argument('--config', type=str, default=None, help='YAML 配置文件路径')
+    parser.add_argument('--model', type=str, default='unet',
+                        choices=MODEL_REGISTRY.keys(), help='模型类型')
+    parser.add_argument('--epochs', type=int, default=None, help='训练轮数')
+    parser.add_argument('--batch_size', type=int, default=None, help='批大小')
+    parser.add_argument('--lr', type=float, default=None, help='学习率')
+    parser.add_argument('--image_dir', type=str, default=None, help='训练图像目录')
+    parser.add_argument('--mask_dir', type=str, default=None, help='训练标签目录')
+    parser.add_argument('--checkpoint_dir', type=str, default=None, help='checkpoint 保存目录')
+    parser.add_argument('--augmentation', action='store_true', help='启用数据增强')
+    return parser.parse_args()
 
 
-unet.train()
+def load_config(config_path):
+    """加载 YAML 配置文件"""
+    import yaml
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
 
-# 定义损失函数和优化器
-criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(unet.parameters(), lr=0.001)
 
-# 训练循环
-num_epochs = 1
-for epoch in range(num_epochs):
-    running_loss = 0.0
-    for i, data in enumerate(tqdm(train_dataloader), 0):
-        inputs, labels = data['rgb'].to(device), data['label'].to(device)
+def main():
+    args = get_args()
 
-        optimizer.zero_grad()
+    # 加载配置文件（如果指定）
+    cfg = {}
+    if args.config:
+        cfg = load_config(args.config)
 
-        outputs = unet(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
+    # 命令行参数优先于配置文件
+    model_name = args.model or cfg.get('model', 'unet')
+    in_ch = cfg.get('in_channels', 1)
+    out_ch = cfg.get('out_channels', 1)
 
-        running_loss += loss.item()
+    train_cfg = cfg.get('train', {})
+    epochs = args.epochs or train_cfg.get('epochs', 50)
+    batch_size = args.batch_size or train_cfg.get('batch_size', 2)
+    lr = args.lr or train_cfg.get('lr', 0.001)
+    image_dir = args.image_dir or train_cfg.get('image_dir', './dataset/train/xray')
+    mask_dir = args.mask_dir or train_cfg.get('mask_dir', './dataset/train/mask')
+    checkpoint_dir = args.checkpoint_dir or train_cfg.get('checkpoint_dir', './checkpoint')
+    augmentation = args.augmentation or train_cfg.get('augmentation', False)
+    save_every = train_cfg.get('save_every', 10)
 
-    print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_dataloader):.4f}")
+    # 设备
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
 
-print('训练完成')
-torch.save({'state_dict': unet.state_dict()}, './checkpoint/UNET_model_MY.pth')
+    # 加载数据
+    image_names = sorted(os.listdir(image_dir))
+    label_names = sorted(os.listdir(mask_dir))
+
+    train_image_paths = [os.path.join(image_dir, f) for f in image_names]
+    train_mask_paths = [os.path.join(mask_dir, f) for f in label_names]
+
+    train_dataset = XRayDataset(
+        images_path_list=train_image_paths,
+        labels_path_list=train_mask_paths,
+        split='Train',
+        augmentation=augmentation,
+        device=device,
+    )
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    # 构建模型
+    model_cls = MODEL_REGISTRY[model_name]
+    model = model_cls(in_ch=in_ch, out_ch=out_ch).to(device)
+    print(f'Model: {model_name}')
+    print(f'Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')
+
+    # 损失函数和优化器
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+
+    # 创建 checkpoint 目录
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # 训练循环
+    best_loss = float('inf')
+    for epoch in range(1, epochs + 1):
+        model.train()
+        running_loss = 0.0
+
+        pbar = tqdm(train_dataloader, desc=f'Epoch [{epoch}/{epochs}]')
+        for data in pbar:
+            inputs = data['rgb'].to(device)
+            labels = data['label'].to(device)
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            pbar.set_postfix(loss=f'{loss.item():.4f}')
+
+        avg_loss = running_loss / len(train_dataloader)
+        scheduler.step(avg_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch [{epoch}/{epochs}] Loss: {avg_loss:.4f} LR: {current_lr:.6f}')
+
+        # 保存 best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            save_path = os.path.join(checkpoint_dir, 'best_model.pth')
+            torch.save({'state_dict': model.state_dict()}, save_path)
+            print(f'  -> Saved best model (loss={best_loss:.4f})')
+
+        # 定期保存 checkpoint
+        if epoch % save_every == 0:
+            save_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch}.pth')
+            torch.save({'state_dict': model.state_dict()}, save_path)
+
+    print('Training complete.')
+
+
+if __name__ == '__main__':
+    main()
